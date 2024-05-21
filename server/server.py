@@ -1,12 +1,13 @@
 from clip_cpp import Clip
 import os
-from typing import Generator, Union
+from typing import AsyncGenerator, Generator, Union
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 from asyncio import Lock
+import asyncio
 import pickle
 import mimetypes
-from tqdm import tqdm
+from tqdm.asyncio import tqdm
 
 processable_types = {'image/png', 'image/jpeg'}
 def is_processable_img(path:str):
@@ -15,38 +16,63 @@ def is_processable_img(path:str):
 
 class MyClip:
     def __init__(self) -> None:
-        # repo_id = 'mys/ggml_CLIP-ViT-B-32-laion2B-s34B-b79K'
         model_path = './models/CLIP-ViT-B-32-laion2B-s34B-b79K_ggml-model-q4_0.gguf'
 
         self.model = Clip(
             model_path_or_repo_id=model_path,
-            # model_file=model_file,
             verbosity=2
         )
 
-    def txt2emb(self, txt:str)->list[float]:
+        self.lock = Lock()
+
+    def _txt2emb_internal(self, txt:str)->list[float]:
         "计算文字向量"
         tokens = self.model.tokenize(txt)
         emb = self.model.encode_text(tokens)
         return emb
+
+    async def txt2emb(self, txt:str)->list[float]:
+        "计算文字向量"
+        async with self.lock:
+            return await asyncio.to_thread(self._txt2emb_internal, txt)
     
-    def img_path2emb(self, img_path:str)->list[float]:
+    def _img_path2emb_internal(self, img_path:str)->list[float]:
         "计算一张图片的向量，使用路径"
         emb = self.model.load_preprocess_encode_image(img_path)
         return emb
 
-    def calculate_similarity(self, emb0:list[float], emb1:list[float]):
+    async def img_path2emb(self, img_path:str)->list[float]:
+        "计算一张图片的向量，使用路径"
+        async with self.lock:
+            return await asyncio.to_thread(self._img_path2emb_internal, img_path)
+
+    def _calculate_similarity_internal(self, emb0:list[float], emb1:list[float]):
+        "计算一对一相似度"
         return self.model.calculate_similarity(emb0, emb1)
 
-    def embs2similarity(self, emb:list[float], embs:Generator[list[float], None, None])->Generator[float, None, None]:
-        "计算一对多相似度，生成器"
-        for i in embs:
-            yield self.calculate_similarity(emb, i)
+    async def calculate_similarity(self, emb0:list[float], emb1:list[float]):
+        "计算一对一相似度"
+        async with self.lock:
+            return await asyncio.to_thread(self._calculate_similarity_internal, emb0, emb1)
 
-    def img_paths2emb(self, img_paths:Union[list[str], set[str]])->Generator[list[float], None, None]:
-        "计算一组图片的向量，生成器"
-        for img_path in img_paths:
-            yield self.img_path2emb(img_path)
+    # async def _embs2similarity_internal(self, emb:list[float], embs:Generator[list[float], None, None])->AsyncGenerator[float, None]:
+    #     "计算一对多相似度，生成器"
+    #     for i in embs:
+    #         sim = await self.calculate_similarity(emb, i)
+    #         yield sim
+
+    # async def embs2similarity(self, emb:list[float], embs:Generator[list[float], None, None])->AsyncGenerator[float, None]:
+    #     "计算一对多相似度，生成器"
+    #     return self._embs2similarity_internal(emb, embs)
+
+    # async def _img_paths2emb_internal(self, img_paths:Union[list[str], set[str]])->AsyncGenerator[list[float], None]:
+    #     "计算一组图片的向量，生成器"
+    #     for img_path in img_paths:
+    #         yield await self.img_path2emb(img_path)
+
+    # async def img_paths2emb(self, img_paths:Union[list[str], set[str]])->AsyncGenerator[list[float], None]:
+    #     "计算一组图片的向量，生成器"
+    #     return self._img_paths2emb_internal(img_paths)
 
 # 使用fastapi来处理请求
 app = FastAPI()
@@ -76,43 +102,39 @@ else:
     image_embeddings: dict[str, list[float]] = {}
     with open("./embeddings.pkl", "wb") as f:
         pickle.dump(image_embeddings, f)
-# 初始化一个锁
-image_lock = Lock()
 
 @app.post("/prep_imgs")
 async def prep_imgs(img_paths: ImgPaths):
     "预处理图片，保存在字典里"
-    async with image_lock:
-        paths:set = set(img_paths.paths) - set(image_embeddings.keys())
-        paths = set(filter(is_processable_img, paths))
-        skip:int = len(img_paths.paths) - len(paths)
-        generator = zip(paths, clip.img_paths2emb(paths))
-        success:int = 0
-        fail:int = 0
+    paths:set = set(img_paths.paths) - set(image_embeddings.keys())
+    paths = set(filter(is_processable_img, paths))
+    skip:int = len(img_paths.paths) - len(paths)
+    success:int = 0
+    fail:int = 0
 
-        for _ in tqdm(range(len(paths)), desc="Processing images", unit="img"):
-            try:
-                path, emb = next(generator)
-                image_embeddings[path] = emb
-                success += 1
-            except Exception as e:
-                fail += 1
-                continue
-            # 每五十张图片保存一次
-            if success % 50 == 0:
-                with open("./embeddings.pkl", "wb") as f:
-                    pickle.dump(image_embeddings, f)
+    for path in tqdm(paths, desc="Processing images", unit="img"):
+        try:
+            emb = await clip.img_path2emb(path)
+            image_embeddings[path] = emb
+            success += 1
+        except Exception as e:
+            fail += 1
+            continue
+        # 每五十张图片保存一次
+        if success % 50 == 0:
+            with open("./embeddings.pkl", "wb") as f:
+                pickle.dump(image_embeddings, f)
 
-        with open("./embeddings.pkl", "wb") as f:
-            pickle.dump(image_embeddings, f)
+    with open("./embeddings.pkl", "wb") as f:
+        pickle.dump(image_embeddings, f)
 
-        return {"success": success, "fail": fail, "skip": skip}
+    return {"success": success, "fail": fail, "skip": skip}
 
-def get_similarity_imgpaths(emb:list[float], lower_limit:float, top_n:int)->list[tuple[str, float]]:
+async def get_similarity_imgpaths(emb:list[float], lower_limit:float, top_n:int)->list[tuple[str, float]]:
     imgpaths_similarity = {}
 
     for target_imgpath, target_emb in image_embeddings.items():
-        similarity = clip.calculate_similarity(emb, target_emb)
+        similarity = await clip.calculate_similarity(emb, target_emb)
         if similarity > lower_limit:
             imgpaths_similarity[target_imgpath] = similarity
 
@@ -131,8 +153,8 @@ async def img2img(img_lower_limit: ImgLowerLimit):
         )
 
     if is_processable_img(img_lower_limit.img_path):
-        emb = clip.img_path2emb(img_lower_limit.img_path)
-        imgpaths_similarity = get_similarity_imgpaths(emb, img_lower_limit.lower_limit, img_lower_limit.top_n)
+        emb = await clip.img_path2emb(img_lower_limit.img_path)
+        imgpaths_similarity = await get_similarity_imgpaths(emb, img_lower_limit.lower_limit, img_lower_limit.top_n)
 
         return imgpaths_similarity
     else:
@@ -151,7 +173,7 @@ async def txt2img(txt_lower_limit: TxtLowerLimit):
             detail="Image embeddings dictionary is empty. Please ensure image preprocessing has been completed."
         )
 
-    emb = clip.txt2emb(txt_lower_limit.txt)
-    imgpaths_similarity = get_similarity_imgpaths(emb, txt_lower_limit.lower_limit, txt_lower_limit.top_n)
+    emb = await clip.txt2emb(txt_lower_limit.txt)
+    imgpaths_similarity = await get_similarity_imgpaths(emb, txt_lower_limit.lower_limit, txt_lower_limit.top_n)
 
     return imgpaths_similarity
