@@ -1,5 +1,6 @@
 import re
-from typing import Dict
+import shutil
+from typing import Dict, Union
 import requests
 import os
 import mimetypes
@@ -9,18 +10,16 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 import json
 from pathlib import Path
 
-
-def recursive_walk(directory:str)->list:
+def recursive_walk(directory: Path) -> list[Path]:
     file_paths = []
-    
-    for item in os.listdir(directory):
-        item_path = os.path.join(directory, item)
-        if os.path.isdir(item_path):
-            # 递归调用时传入绝对路径，确保后续处理都是基于绝对路径的
-            file_paths.extend(recursive_walk(item_path))
+
+    for item in directory.iterdir():  # 使用iterdir遍历子目录和文件
+        if item.is_dir():  # 检查是否为目录
+            # 直接递归调用并extend结果，pathlib的Path对象可以直接操作，无需转换
+            file_paths.extend(recursive_walk(item))
         else:
-            # 添加绝对路径到file_paths列表
-            file_paths.append(os.path.abspath(item_path))
+            # 直接添加到列表，Path对象即表示绝对路径
+            file_paths.append(item)
 
     return file_paths
 
@@ -31,26 +30,53 @@ def multi_walk(directorys:list)->list:
     
     return file_paths
 
-
 def get_names(paths:list)->list:
     return list(map(os.path.basename, paths))
 
+def get_usable_path(path: Path) -> Path:
+    # 循环直到找到一个未被使用的文件名
+    counter = 1
+    while path.exists():
+        path_split = path.stem.split("_")
+        if len(path_split) > 1:
+            try:
+                # 构造新的文件夹名，通过检查是否已存在'_数字'后缀来决定如何拼接
+                counter = int(path_split[-1])
+                new_name = "_".join(path_split[:-1]) + f"_{counter+1}"
+            except ValueError:
+                # 否则，在原始名称后添加序号
+                new_name = f"{path.stem}_{counter}"
+            # 更新路径
+        else:
+            new_name = f"{path.stem}_{counter}"
+
+        path = path.parent / (new_name+path.suffix)
+
+    return path
+
 processable_types = {'image/png', 'image/jpeg'}
-def is_processable_img(path):
+def is_processable_img(path: Union[str, Path]) -> bool:
     t, _ = mimetypes.guess_type(path)
     return t in processable_types and os.path.exists(path)
 
 # 加载配置
 with open("./client_settings.yaml", "r") as file:
     settings = yaml.safe_load(file)
-    imgs_path = Path(settings["img_path"]).absolute()
+
+    imgs_path = Path(settings["imgs_path"]).absolute()
     img_search_path = Path(settings["img_search_path"]).absolute()
     txt_search_path = Path(settings["txt_search_path"]).absolute()
+
+    server_url:str = settings["server_url"]
+
+    img2imgs_point:str = settings["img2imgs_point"]
+    txt2imgs_point:str = settings["txt2imgs_point"]
+    prep_imgs_point:str = settings["prep_imgs_point"]
 
 class Img2ImgsHandler(FileSystemEventHandler):
     def get_similarity(self, path: Path) -> list[tuple[str, float]]:
         "从服务器获取相似度"
-        req = requests.post(settings["img2img_url"],
+        req = requests.post(server_url + img2imgs_point,
                         json={
                           "img_path": str(path.absolute()),
                         },
@@ -63,26 +89,25 @@ class Img2ImgsHandler(FileSystemEventHandler):
         """图搜图"""
         similarity = self.get_similarity(path)
         # 将得到的图片链接到文件夹里
-        target_path = img_search_path / ".".join(os.path.basename(path).split(".")[:-1])
-        if target_path.exists():
-            target_path.rmdir()
+        target_path = get_usable_path(img_search_path / ".".join(os.path.basename(path).split(".")[:-1]))
         target_path.mkdir()
         i = 0
         for img_path, s in similarity:
-            os.link(imgs_path, target_path / f"{i}_{s:.4f}_{os.path.basename(img_path)}")
+            os.link(img_path, target_path / f"{i}_{s:.4f}_{os.path.basename(img_path)}")
             i += 1
 
     def on_created(self, event):
-        print("img2imgs", event.src_path)
-        if Path(event.src_path).parent.absolute() == img_search_path.absolute() and is_processable_img(event.src_path):
-            self.search(Path(event.src_path))
+        path = Path(event.src_path)
+        if path.parent.absolute() == img_search_path.absolute() and is_processable_img(path):
+            print("img2imgs", path)
+            self.search(path)
 
 class Txt2ImgsHandler(FileSystemEventHandler):
     def get_similarity(self, path: Path) -> list[tuple[str, float]]:
         "从服务器获取相似度"
         with open(path, 'r') as f:
             txt = f.read()
-        req = requests.post(settings["txt2img_url"],
+        req = requests.post(server_url + txt2imgs_point,
                         json={
                           "txt": txt,
                         },
@@ -94,31 +119,33 @@ class Txt2ImgsHandler(FileSystemEventHandler):
     def search(self, path:Path):
         """文搜图"""
         similarity = self.get_similarity(path)
-        target_path = txt_search_path / ".".join(os.path.basename(path).split(".")[:-1])
-        if target_path.exists():
-            target_path.rmdir()
+        target_path = get_usable_path(txt_search_path / ".".join(path.name.split(".")[:-1]))
         target_path.mkdir()
         i = 0
+        shutil.copy(path, target_path / path.name)
         for img_path, s in similarity:
             os.link(img_path, target_path / f"{i}_{s:.4f}_{os.path.basename(img_path)}")
             i += 1
 
-    def on_modified(self, event: FileSystemEvent) -> None:
-        print("txt2imgs", event.src_path)
-        if Path(event.src_path).parent.absolute() == txt_search_path.absolute():
-            self.search(Path(event.src_path))
+    def on_created(self, event: FileSystemEvent) -> None:
+        path = Path(event.src_path)
+        if path.is_file() and path.parent.absolute() == txt_search_path.absolute():
+            print("txt2imgs", path)
+            self.search(path)
 
 class ImgCreateHandler(FileSystemEventHandler):
-    """在目标路径创建图片时，让服务器预处理该图片"""
+    """图片路径新增图片时，让服务器预处理该图片"""
     def prep_img(self, path):
-        requests.post(settings['prep_imgs_url'], json={
-                "paths": [path]
-            })
+        requests.post(server_url + prep_imgs_point, 
+                        json={
+                            "paths": [path]
+                        })
 
     def on_created(self, event):
-        if is_processable_img(event.src_path):
-            print("Processing created image", event.src_path)
-            self.prep_img(event.src_path)
+        path = Path(event.src_path)
+        if is_processable_img(path):
+            print("Processing created image", path)
+            self.prep_img(path)
 
 def prep_observer(event_handler, path):
     observer = Observer()
@@ -128,22 +155,22 @@ def prep_observer(event_handler, path):
     return observer
 
 if __name__ == "__main__":
-    images:list = list(filter(is_processable_img, recursive_walk(settings["img_path"])))
+    img_paths:list = list(map(str, filter(is_processable_img, recursive_walk(imgs_path))))
     print("Processing images...")
-    req = requests.post(settings['prep_imgs_url'], json={
-            "paths": images
+    req = requests.post(server_url + prep_imgs_point, json={
+            "paths": img_paths
         })
     print(req.json())
 
-    img2img_event_handler = Img2ImgsHandler()
-    img2img_observer = Observer()
-    
-    img2img_observer.schedule(img2img_event_handler, settings["img_search_path"], recursive=True)  # recursive=True 表示递归监控子目录
-    img2img_observer.start()
+    observers = []
+    observers.append(prep_observer(Img2ImgsHandler(), img_search_path))
+    observers.append(prep_observer(Txt2ImgsHandler(), txt_search_path))
 
     try:
         while True:
             pass
     except KeyboardInterrupt:
-        img2img_observer.stop()
-    img2img_observer.join()
+        for o in observers:
+            o.stop()
+    for o in observers:
+        o.join()

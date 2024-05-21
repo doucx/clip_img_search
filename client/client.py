@@ -31,7 +31,6 @@ def multi_walk(directorys:list)->list:
     
     return file_paths
 
-
 def get_names(paths:list)->list:
     return list(map(os.path.basename, paths))
 

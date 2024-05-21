@@ -55,25 +55,6 @@ class MyClip:
         async with self.lock:
             return await asyncio.to_thread(self._calculate_similarity_internal, emb0, emb1)
 
-    # async def _embs2similarity_internal(self, emb:list[float], embs:Generator[list[float], None, None])->AsyncGenerator[float, None]:
-    #     "计算一对多相似度，生成器"
-    #     for i in embs:
-    #         sim = await self.calculate_similarity(emb, i)
-    #         yield sim
-
-    # async def embs2similarity(self, emb:list[float], embs:Generator[list[float], None, None])->AsyncGenerator[float, None]:
-    #     "计算一对多相似度，生成器"
-    #     return self._embs2similarity_internal(emb, embs)
-
-    # async def _img_paths2emb_internal(self, img_paths:Union[list[str], set[str]])->AsyncGenerator[list[float], None]:
-    #     "计算一组图片的向量，生成器"
-    #     for img_path in img_paths:
-    #         yield await self.img_path2emb(img_path)
-
-    # async def img_paths2emb(self, img_paths:Union[list[str], set[str]])->AsyncGenerator[list[float], None]:
-    #     "计算一组图片的向量，生成器"
-    #     return self._img_paths2emb_internal(img_paths)
-
 # 使用fastapi来处理请求
 app = FastAPI()
 clip = MyClip()
@@ -143,8 +124,8 @@ async def get_similarity_imgpaths(emb:list[float], lower_limit:float, top_n:int)
 
     return imgpaths_similarity[:top_n]
 
-@app.post("/img2img")
-async def img2img(img_lower_limit: ImgLowerLimit):
+@app.post("/img2imgs")
+async def img2imgs(img_lower_limit: ImgLowerLimit):
     "根据图片路径与提供的下限，返回对应的相似图片路径"
     if len(image_embeddings) == 0:
         raise HTTPException(
@@ -164,8 +145,8 @@ async def img2img(img_lower_limit: ImgLowerLimit):
         )
 
 
-@app.post("/txt2img")
-async def txt2img(txt_lower_limit: TxtLowerLimit):
+@app.post("/txt2imgs")
+async def txt2imgs(txt_lower_limit: TxtLowerLimit):
     "根据文字与提供的下限，返回对应的相似图片路径"
     if len(image_embeddings) == 0:
         raise HTTPException(
