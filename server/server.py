@@ -1,4 +1,6 @@
+from contextlib import asynccontextmanager
 from clip_cpp import Clip
+from apscheduler.schedulers.background import BackgroundScheduler
 import os
 from typing import AsyncGenerator, Generator, Union
 from fastapi import FastAPI, HTTPException, status
@@ -7,6 +9,7 @@ from asyncio import Lock
 import asyncio
 import pickle
 import mimetypes
+import uvicorn
 from tqdm.asyncio import tqdm
 
 processable_types = {'image/png', 'image/jpeg'}
@@ -16,14 +19,15 @@ def is_processable_img(path:str):
 
 class MyClip:
     def __init__(self) -> None:
+        self.lock = Lock()
+
+    def load_model(self):
         model_path = './models/CLIP-ViT-B-32-laion2B-s34B-b79K_ggml-model-q4_0.gguf'
 
         self.model = Clip(
             model_path_or_repo_id=model_path,
             verbosity=2
         )
-
-        self.lock = Lock()
 
     def _txt2emb_internal(self, txt:str)->list[float]:
         "计算文字向量"
@@ -55,10 +59,6 @@ class MyClip:
         async with self.lock:
             return await asyncio.to_thread(self._calculate_similarity_internal, emb0, emb1)
 
-# 使用fastapi来处理请求
-app = FastAPI()
-clip = MyClip()
-
 class ImgPaths(BaseModel):
     "图片路径列表"
     paths: list[str]
@@ -75,14 +75,44 @@ class TxtLowerLimit(BaseModel):
     lower_limit: Union[float, None] = 0
     top_n: Union[int, None] = 50
 
+
+def save_embeddings():
+    """保存image_embeddings到文件"""
+    with open("./embeddings.pkl", "wb") as f:
+        pickle.dump(image_embeddings, f)
+    print("Embeddings saved.")
+
 # 全局图片路径-向量字典
 if os.path.exists("./embeddings.pkl"):
     with open("./embeddings.pkl", "rb") as f:
         image_embeddings: dict[str, list[float]] = pickle.load(f)
 else:
     image_embeddings: dict[str, list[float]] = {}
-    with open("./embeddings.pkl", "wb") as f:
-        pickle.dump(image_embeddings, f)
+    save_embeddings()
+
+# 初始化调度器
+scheduler = BackgroundScheduler(timezone="Asia/Shanghai")  # 请替换为你所在时区
+
+# 添加任务：每五分钟执行一次save_embeddings
+scheduler.add_job(save_embeddings, 'interval', minutes=20)
+
+# 启动调度器
+scheduler.start()
+
+clip = MyClip()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    "生命周期事件"
+    # Load the ML model
+    clip.load_model()
+    yield
+    # FastAPI应用关闭时，关闭调度器
+    scheduler.shutdown()
+    save_embeddings()
+
+## fastapi部分
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/prep_imgs")
 async def prep_imgs(img_paths: ImgPaths):
@@ -98,13 +128,16 @@ async def prep_imgs(img_paths: ImgPaths):
             emb = await clip.img_path2emb(path)
             image_embeddings[path] = emb
             success += 1
+            # 每五十张图片重置一次模型并保存
+            if len(image_embeddings) % 50 == 0:
+                save_embeddings()
+                # del clip.model
+                # import gc; gc.collect()
+                # clip.load_model()
+                # print("reloaded model")
         except Exception as e:
             fail += 1
             continue
-        # 每五十张图片保存一次
-        if success % 50 == 0:
-            with open("./embeddings.pkl", "wb") as f:
-                pickle.dump(image_embeddings, f)
 
     with open("./embeddings.pkl", "wb") as f:
         pickle.dump(image_embeddings, f)
@@ -116,7 +149,7 @@ async def get_similarity_imgpaths(emb:list[float], lower_limit:float, top_n:int)
 
     for target_imgpath, target_emb in image_embeddings.items():
         similarity = await clip.calculate_similarity(emb, target_emb)
-        if similarity > lower_limit:
+        if 1>= similarity > lower_limit:
             imgpaths_similarity[target_imgpath] = similarity
 
     imgpaths_similarity = list(imgpaths_similarity.items())
