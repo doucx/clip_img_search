@@ -138,7 +138,7 @@ class ImgCreateHandler(FileSystemEventHandler):
     def prep_img(self, path):
         requests.post(server_url + prep_imgs_point, 
                         json={
-                            "paths": [path]
+                            "paths": [str(path.absolute())]
                         })
 
     def on_created(self, event):
