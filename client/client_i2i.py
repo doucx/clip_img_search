@@ -43,7 +43,7 @@ def is_processable_img(path):
 # 加载配置
 with open("./client_settings.yaml", "r") as file:
     settings = yaml.safe_load(file)
-    img_path = Path(settings["img2img_url"]).absolute()
+    imgs_path = Path(settings["img_path"]).absolute()
     img_search_path = Path(settings["img_search_path"]).absolute()
     txt_search_path = Path(settings["txt_search_path"]).absolute()
 
@@ -69,7 +69,7 @@ class Img2ImgsHandler(FileSystemEventHandler):
         target_path.mkdir()
         i = 0
         for img_path, s in similarity:
-            os.link(img_path, target_path / f"{i}_{s:.4f}_{os.path.basename(img_path)}")
+            os.link(imgs_path, target_path / f"{i}_{s:.4f}_{os.path.basename(img_path)}")
             i += 1
 
     def on_created(self, event):
