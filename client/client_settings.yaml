@@ -1,0 +1,6 @@
+img_path: /media/warehouse/sftpgo/data/GinNoKaze/images/
+txt_search_path: /media/warehouse/sftpgo/data/GinNoKaze/search_images/txt2img/
+img_search_path: /media/warehouse/sftpgo/data/GinNoKaze/search_images/img2img/
+prep_imgs_url: http://127.0.0.1:8000/prep_imgs
+img2img_url: http://127.0.0.1:8000/img2img
+txt2img_url: http://127.0.0.1:8000/txt2img
