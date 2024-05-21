@@ -7,6 +7,7 @@ import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 import json
+from pathlib import Path
 
 
 def recursive_walk(directory:str)->list:
@@ -84,9 +85,11 @@ class Img2ImgsHandler(FileSystemEventHandler):
 class Txt2ImgsHandler(FileSystemEventHandler):
     def get_similarity(self, path: str) -> Dict[str, float]:
         with open(path, "r") as f:
-            j = json.load(f)
+            txt = f.read()
         similarity:Dict[str, float] = requests.post(settings["txt2img_url"],
-                        json=j,
+                        json={
+                            "txt": txt
+                            },
                         timeout=10
                     )
         return similarity
@@ -97,7 +100,6 @@ class Txt2ImgsHandler(FileSystemEventHandler):
             try:
                 similarity = self.get_similarity(path)
             except Exception as e:
-                print("fail to t2i")
                 return
 
             print("t2i")
@@ -106,13 +108,9 @@ class Txt2ImgsHandler(FileSystemEventHandler):
             for img_path, s in similarity.items():
                 os.link(img_path, settings["img_search_path"] + f"{i}_{s:.4f}_{os.path.basename(img_path)}")
                 i += 1
-
-    # def on_created(self, event):
-    #     self.search(event.src_path)
     
     def on_modified(self, event: FileSystemEvent) -> None:
-        breakpoint()
-        print("m")
+        print("Search txt")
         self.search(event.src_path)
 
 class ImgCreateHandler(FileSystemEventHandler):

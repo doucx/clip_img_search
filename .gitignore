@@ -1,2 +1,4 @@
 server/models/*
+server/*.pkl
 server/clip.cpp/
+client/client_settings.yaml
