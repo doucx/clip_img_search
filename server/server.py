@@ -187,6 +187,7 @@ def get_similarity_imgpaths(
 @app.post("/img2imgs")
 async def img2imgs(img_lower_limit: ImgLowerLimit):
     "根据图片路径与提供的下限，返回对应的相似图片路径"
+    print("img2imgs")
     if len(image_embeddings) == 0:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -207,6 +208,7 @@ async def img2imgs(img_lower_limit: ImgLowerLimit):
 @app.post("/txt2imgs")
 async def txt2imgs(txt_lower_limit: TxtLowerLimit):
     "根据文字与提供的下限，返回对应的相似图片路径"
+    print("txt2imgs")
     if len(image_embeddings) == 0:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
