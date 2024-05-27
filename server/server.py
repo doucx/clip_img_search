@@ -2,14 +2,11 @@ from contextlib import asynccontextmanager
 from clip_cpp import Clip
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
-from typing import AsyncGenerator, Generator, Union
+from typing import Union
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
-from asyncio import Lock
-import asyncio
 import pickle
 import mimetypes
-import uvicorn
 from tqdm.asyncio import tqdm
 
 processable_types = {'image/png', 'image/jpeg'}

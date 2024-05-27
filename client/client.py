@@ -2,6 +2,7 @@ import re
 import shutil
 from typing import Dict, Union
 import requests
+import aiohttp
 import os
 import mimetypes
 import yaml
@@ -11,7 +12,7 @@ import json
 from pathlib import Path
 
 import asyncio
-from asyncio import Queue
+from asyncio import Lock, Queue
 
 
 def recursive_walk(directory: Path) -> list[Path]:
@@ -86,20 +87,26 @@ with open("./client_settings.yaml", "r") as file:
 
 
 class Img2ImgsHandler(FileSystemEventHandler):
-    def get_similarity(self, path: Path) -> list[tuple[str, float]]:
-        "从服务器获取相似度"
-        req = requests.post(server_url + img2imgs_point,
-                            json={
-                                "img_path": str(path.absolute()),
-                            },
-                            )
-        print("Got", len(req.json()))
-        similarity: list[tuple[str, float]] = req.json()
-        return similarity
+    def __init__(self, loop) -> None:
+        super().__init__()
+        self.loop = loop
 
-    def search(self, path: Path):
+    async def get_similarity(self, path: Path) -> list[tuple[str, float]]:
+        "从服务器获取相似度"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(server_url + img2imgs_point,
+                                    json={
+                                        "img_path": str(path.absolute()),
+                                    },
+                                    ) as response:
+                res_json = await response.json()
+                print("Got", len(res_json))
+                similarity: list[tuple[str, float]] = res_json
+                return similarity
+
+    async def search(self, path: Path):
         """图搜图"""
-        similarity = self.get_similarity(path)
+        similarity = await self.get_similarity(path)
         # 将得到的图片链接到文件夹里
         target_path = get_usable_path(
             img_search_path /
@@ -116,28 +123,34 @@ class Img2ImgsHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         path = Path(event.src_path)
-        if path.parent.absolute() == img_search_path.absolute() and is_processable_img(path):
+        if is_processable_img(path):
             print("img2imgs", path)
-            self.search(path)
+            asyncio.run_coroutine_threadsafe(self.search(path), self.loop)
 
 
 class Txt2ImgsHandler(FileSystemEventHandler):
-    def get_similarity(self, path: Path) -> list[tuple[str, float]]:
-        "从服务器获取相似度"
+    def __init__(self, loop) -> None:
+        super().__init__()
+        self.loop = loop
+
+    async def get_similarity(self, path: Path) -> list[tuple[str, float]]:
+        "利用文本路径，从服务器获取相似度"
         with open(path, 'r') as f:
             txt = f.read()
-        req = requests.post(server_url + txt2imgs_point,
-                            json={
-                                "txt": txt,
-                            },
-                            )
-        print("Got", len(req.json()))
-        similarity: list[tuple[str, float]] = req.json()
-        return similarity
+        async with aiohttp.ClientSession() as session:
+            async with session.post(server_url + txt2imgs_point,
+                                    json={
+                                        "txt": txt,
+                                    },
+                                    ) as response:
+                res_json = await response.json()
+                print("Got", len(res_json))
+                similarity: list[tuple[str, float]] = res_json
+                return similarity
 
-    def search(self, path: Path):
+    async def search(self, path: Path):
         """文搜图"""
-        similarity = self.get_similarity(path)
+        similarity = await self.get_similarity(path)
         target_path = get_usable_path(
             txt_search_path /
             ".".join(
@@ -154,37 +167,49 @@ class Txt2ImgsHandler(FileSystemEventHandler):
 
     def on_created(self, event: FileSystemEvent) -> None:
         path = Path(event.src_path)
-        if path.is_file() and path.parent.absolute() == txt_search_path.absolute():
+        if path.is_file():
             print("txt2imgs", path)
-            self.search(path)
+            asyncio.run_coroutine_threadsafe(self.search(path), self.loop)
 
 
 class ImgCreateHandler(FileSystemEventHandler):
     """图片路径新增图片时，让服务器预处理该图片"""
 
-    def prep_img(self, path):
-        requests.post(server_url + prep_imgs_point,
-                      json={
-                          "paths": [str(path.absolute())]
-                      })
+    def __init__(self, loop) -> None:
+        super().__init__()
+        self.loop = loop
+
+    async def prep_img(self, path):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(server_url + prep_imgs_point,
+                                    json={
+                                        "paths": [str(path.absolute())]
+                                    }) as response:
+                if response.status == 200:
+                    print(f"Successfully sent {path}")
+                else:
+                    print(
+                        f"Failed to send {path}, status code: {response.status}")
 
     def on_created(self, event):
         path = Path(event.src_path)
         if is_processable_img(path):
             print("Processing created image", path)
-            self.prep_img(path)
+            asyncio.run_coroutine_threadsafe(self.prep_img(path), self.loop)
 
 
-def prep_observer(event_handler, path):
+def prep_observer(event_handler, path, recursive=False):
     observer = Observer()
 
     # recursive=True 表示递归监控子目录
-    observer.schedule(event_handler, path, recursive=True)
+    observer.schedule(event_handler, path, recursive=recursive)
     observer.start()
     return observer
 
 
-if __name__ == "__main__":
+async def main():
+    loop = asyncio.get_running_loop()
+
     img_paths: list = list(
         map(str, filter(is_processable_img, recursive_walk(imgs_path))))
     print("Processing images...")
@@ -193,16 +218,20 @@ if __name__ == "__main__":
     })
     print(req.json())
 
-    observers = []
-    observers.append(prep_observer(Img2ImgsHandler(), img_search_path))
-    observers.append(prep_observer(Txt2ImgsHandler(), txt_search_path))
-    observers.append(prep_observer(ImgCreateHandler(), imgs_path))
+    observers = [
+        prep_observer(Img2ImgsHandler(loop), img_search_path),
+        prep_observer(Txt2ImgsHandler(loop), txt_search_path),
+        prep_observer(ImgCreateHandler(loop), imgs_path, recursive=True)
+    ]
 
     try:
         while True:
-            pass
+            await asyncio.sleep(1)
     except KeyboardInterrupt:
         for o in observers:
             o.stop()
     for o in observers:
         o.join()
+
+if __name__ == "__main__":
+    asyncio.run(main())
