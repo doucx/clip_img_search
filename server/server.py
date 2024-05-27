@@ -8,48 +8,78 @@ from pydantic import BaseModel
 import pickle
 import mimetypes
 from tqdm.asyncio import tqdm
+import numpy as np
+import asyncio
 
 processable_types = {'image/png', 'image/jpeg'}
 
-
-def is_processable_img(path: str):
-    t, _ = mimetypes.guess_type(path)
-    return t in processable_types and os.path.exists(path)
-
-
 class MyClip:
     def __init__(self) -> None:
-        pass
+        self.lock = asyncio.Lock()
 
     def load_model(self):
-        model_path = './models/CLIP-ViT-B-32-laion2B-s34B-b79K_ggml-model-q4_0.gguf'
+        model_path = './models/CLIP-ViT-B-32-laion2B-s34B-b79K_ggml-model-q8_0.gguf'
 
         self.model = Clip(
             model_path_or_repo_id=model_path,
             verbosity=2
         )
 
-    def txt2emb(self, txt: str) -> list[float]:
+    async def txt2emb(self, txt: str) -> list[float]:
         "计算文字向量"
-        tokens = self.model.tokenize(txt)
-        emb = self.model.encode_text(tokens)
-        return emb
+        async with self.lock:
+            tokens = self.model.tokenize(txt)
+            emb = self.model.encode_text(tokens)
+            return emb
 
-    def img_path2emb(self, img_path: str) -> list[float]:
+    async def img_path2emb(self, img_path: str) -> list[float]:
         "计算一张图片的向量，使用路径"
-        emb = self.model.load_preprocess_encode_image(img_path)
-        return emb
+        # TODO 使用自己的加载图片方法
+
+        async with self.lock:
+            emb = self.model.load_preprocess_encode_image(img_path)
+            return emb
+
+    def cosine_similarity(self, vector_a, vector_b):
+        """
+        计算两个向量的余弦相似度。
+        
+        参数:
+        vector_a, vector_b: 1-D numpy数组，表示两个向量。
+        
+        返回:
+        两个向量的余弦相似度，范围在-1到1之间。
+        """
+        # 确保输入是numpy数组
+        vector_a = np.array(vector_a)
+        vector_b = np.array(vector_b)
+        
+        # 计算点积
+        dot_product = np.dot(vector_a, vector_b)
+        
+        # 计算向量的模长（欧几里得范数）
+        norm_a = np.linalg.norm(vector_a)
+        norm_b = np.linalg.norm(vector_b)
+        
+        # 避免除以零错误
+        if norm_a == 0 or norm_b == 0:
+            return 0  # 如果任一向量为零向量，则认为相似度为0
+        
+        # 计算并返回余弦相似度
+        return dot_product / (norm_a * norm_b)
 
     def calculate_similarity(
             self, emb0: list[float], emb1: list[float]):
         "计算一对一相似度"
-        return self.model.calculate_similarity(emb0, emb1)
+        return self.cosine_similarity(emb0, emb1)
 
+def is_processable_img(path: str):
+    t, _ = mimetypes.guess_type(path)
+    return t in processable_types and os.path.exists(path)
 
 class ImgPaths(BaseModel):
     "图片路径列表"
     paths: list[str]
-
 
 class ImgLowerLimit(BaseModel):
     "图片路径与下限"
@@ -57,19 +87,21 @@ class ImgLowerLimit(BaseModel):
     lower_limit: Union[float, None] = 0
     top_n: Union[int, None] = 50
 
-
 class TxtLowerLimit(BaseModel):
     "文字与下限"
     txt: str
     lower_limit: Union[float, None] = 0
     top_n: Union[int, None] = 50
 
-
+need_to_save = False
 def save_embeddings():
     """保存image_embeddings到文件"""
-    with open("./embeddings.pkl", "wb") as f:
-        pickle.dump(image_embeddings, f)
-    print("Embeddings saved.")
+    global need_to_save
+    if need_to_save:
+        with open("./embeddings.pkl", "wb") as f:
+            pickle.dump(image_embeddings, f)
+        print("Embeddings saved.")
+        need_to_save = False
 
 
 # 全局图片路径-向量字典
@@ -83,7 +115,7 @@ else:
 # 初始化调度器
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")  # 请替换为你所在时区
 
-# 添加任务：每五分钟执行一次save_embeddings
+# 添加任务：每20分钟执行一次save_embeddings
 scheduler.add_job(save_embeddings, 'interval', minutes=20)
 
 # 启动调度器
@@ -107,19 +139,22 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/prep_imgs")
-def prep_imgs(img_paths: ImgPaths):
+async def prep_imgs(img_paths: ImgPaths):
     "预处理图片，保存在字典里"
-    paths: set = set(img_paths.paths) - set(image_embeddings.keys())
+    paths = set(img_paths.paths) - set(image_embeddings.keys())
     paths = set(filter(is_processable_img, paths))
-    skip: int = len(img_paths.paths) - len(paths)
-    success: int = 0
-    fail: int = 0
+    skip = len(img_paths.paths) - len(paths)
+    success = 0
+    fail = 0
+
+    global need_to_save
 
     for path in tqdm(paths, desc="Processing images", unit="img"):
         try:
-            emb = clip.img_path2emb(path)
+            emb = await clip.img_path2emb(path)
             image_embeddings[path] = emb
             success += 1
+            need_to_save = True
             # 每五十张图片重置一次模型并保存
             # TODO 解决内存泄漏
             if len(image_embeddings) % 50 == 0:
@@ -140,7 +175,7 @@ def get_similarity_imgpaths(
 
     for target_imgpath, target_emb in image_embeddings.items():
         similarity = clip.calculate_similarity(emb, target_emb)
-        if 1 >= similarity > lower_limit:
+        if similarity > lower_limit:
             imgpaths_similarity[target_imgpath] = similarity
 
     imgpaths_similarity = list(imgpaths_similarity.items())
@@ -150,7 +185,7 @@ def get_similarity_imgpaths(
 
 
 @app.post("/img2imgs")
-def img2imgs(img_lower_limit: ImgLowerLimit):
+async def img2imgs(img_lower_limit: ImgLowerLimit):
     "根据图片路径与提供的下限，返回对应的相似图片路径"
     if len(image_embeddings) == 0:
         raise HTTPException(
@@ -158,7 +193,7 @@ def img2imgs(img_lower_limit: ImgLowerLimit):
             detail="Image embeddings dictionary is empty. Please ensure image preprocessing has been completed.")
 
     if is_processable_img(img_lower_limit.img_path):
-        emb = clip.img_path2emb(img_lower_limit.img_path)
+        emb = await clip.img_path2emb(img_lower_limit.img_path)
         imgpaths_similarity = get_similarity_imgpaths(emb, img_lower_limit.lower_limit, img_lower_limit.top_n)
 
         return imgpaths_similarity
@@ -170,14 +205,14 @@ def img2imgs(img_lower_limit: ImgLowerLimit):
 
 
 @app.post("/txt2imgs")
-def txt2imgs(txt_lower_limit: TxtLowerLimit):
+async def txt2imgs(txt_lower_limit: TxtLowerLimit):
     "根据文字与提供的下限，返回对应的相似图片路径"
     if len(image_embeddings) == 0:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Image embeddings dictionary is empty. Please ensure image preprocessing has been completed.")
 
-    emb = clip.txt2emb(txt_lower_limit.txt)
+    emb = await clip.txt2emb(txt_lower_limit.txt)
     imgpaths_similarity = get_similarity_imgpaths(emb, txt_lower_limit.lower_limit, txt_lower_limit.top_n)
 
     return imgpaths_similarity
