@@ -227,11 +227,13 @@ async def main():
     try:
         while True:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
+    except asyncio.CancelledError:
+        print("Stopping")
+    finally:
         for o in observers:
             o.stop()
-    for o in observers:
-        o.join()
+        for o in observers:
+            o.join()
 
 if __name__ == "__main__":
     asyncio.run(main())

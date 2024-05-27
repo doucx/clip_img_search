@@ -19,7 +19,7 @@ def is_processable_img(path: str):
 
 class MyClip:
     def __init__(self) -> None:
-        self.lock = Lock()
+        pass
 
     def load_model(self):
         model_path = './models/CLIP-ViT-B-32-laion2B-s34B-b79K_ggml-model-q4_0.gguf'
