@@ -12,8 +12,8 @@ import json
 from pathlib import Path
 
 import asyncio
-from asyncio import Lock, Queue
 
+processable_types = {'image/png', 'image/jpeg'}
 
 def recursive_walk(directory: Path) -> list[Path]:
     file_paths = []
@@ -61,10 +61,6 @@ def get_usable_path(path: Path) -> Path:
         path = path.parent / (new_name + path.suffix)
 
     return path
-
-
-processable_types = {'image/png', 'image/jpeg'}
-
 
 def is_processable_img(path: Union[str, Path]) -> bool:
     t, _ = mimetypes.guess_type(path)
@@ -167,7 +163,7 @@ class Txt2ImgsHandler(FileSystemEventHandler):
 
     def on_created(self, event: FileSystemEvent) -> None:
         path = Path(event.src_path)
-        if path.is_file():
+        if path.suffix == ".txt" and path.is_file():
             print("txt2imgs", path)
             asyncio.run_coroutine_threadsafe(self.search(path), self.loop)
 
