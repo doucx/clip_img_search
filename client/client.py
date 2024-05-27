@@ -10,6 +10,9 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 import json
 from pathlib import Path
 
+import asyncio
+from asyncio import Queue
+
 
 def recursive_walk(directory: Path) -> list[Path]:
     file_paths = []
