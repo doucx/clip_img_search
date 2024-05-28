@@ -1,4 +1,3 @@
-import re
 import shutil
 from typing import Dict, Union
 import requests
@@ -8,7 +7,6 @@ import mimetypes
 import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
-import json
 from pathlib import Path
 
 import asyncio

@@ -35,6 +35,7 @@ class MyClip:
     async def img_path2emb(self, img_path: str) -> list[float]:
         "计算一张图片的向量，使用路径"
         # TODO 使用自己的加载图片方法
+        # TODO 解决内存泄漏
 
         async with self.lock:
             emb = self.model.load_preprocess_encode_image(img_path)
@@ -108,6 +109,7 @@ def save_embeddings():
 if os.path.exists("./embeddings.pkl"):
     with open("./embeddings.pkl", "rb") as f:
         image_embeddings: dict[str, list[float]] = pickle.load(f)
+        image_embeddings = {k: v for k, v in image_embeddings.items() if os.path.exists(k)}
 else:
     image_embeddings: dict[str, list[float]] = {}
     save_embeddings()
@@ -142,7 +144,6 @@ app = FastAPI(lifespan=lifespan)
 async def prep_imgs(img_paths: ImgPaths):
     "预处理图片，保存在字典里"
     paths = set(img_paths.paths) - set(image_embeddings.keys())
-    paths = set(filter(is_processable_img, paths))
     skip = len(img_paths.paths) - len(paths)
     success = 0
     fail = 0
@@ -151,14 +152,16 @@ async def prep_imgs(img_paths: ImgPaths):
 
     for path in tqdm(paths, desc="Processing images", unit="img"):
         try:
-            emb = await clip.img_path2emb(path)
-            image_embeddings[path] = emb
-            success += 1
-            need_to_save = True
-            # 每五十张图片重置一次模型并保存
-            # TODO 解决内存泄漏
-            if len(image_embeddings) % 50 == 0:
-                save_embeddings()
+            if is_processable_img(path):
+                emb = await clip.img_path2emb(path)
+                image_embeddings[path] = emb
+                success += 1
+                need_to_save = True
+                # 每五十张图片重置一次模型并保存
+                if len(image_embeddings) % 50 == 0:
+                    save_embeddings()
+            else:
+                fail += 1
         except Exception as e:
             fail += 1
             continue
@@ -172,11 +175,18 @@ async def prep_imgs(img_paths: ImgPaths):
 def get_similarity_imgpaths(
         emb: list[float], lower_limit: float, top_n: int) -> list[tuple[str, float]]:
     imgpaths_similarity = {}
+    keys_to_remove = []
 
     for target_imgpath, target_emb in image_embeddings.items():
-        similarity = clip.calculate_similarity(emb, target_emb)
-        if similarity > lower_limit:
-            imgpaths_similarity[target_imgpath] = similarity
+        if os.path.exists(target_imgpath):
+            similarity = clip.calculate_similarity(emb, target_emb)
+            if similarity > lower_limit:
+                imgpaths_similarity[target_imgpath] = similarity
+        else:
+            keys_to_remove.append(target_imgpath)
+
+    for k in keys_to_remove:
+        del image_embeddings[k]
 
     imgpaths_similarity = list(imgpaths_similarity.items())
     imgpaths_similarity.sort(key=(lambda x: x[1]), reverse=True)
